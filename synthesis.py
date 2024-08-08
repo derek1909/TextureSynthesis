@@ -33,33 +33,30 @@ SIGMA_COEFF = 6.4      # The denominator for a 2D Gaussian sigma used in the ref
 ERROR_THRESHOLD = 0.1  # The default error threshold for synthesis acceptance in the reference implementation.
 
 
-def normalized_ssd(sample_size, strided_sample, window, mask):
-    # window, mask and strided_sample are in the skernel shape
+def find_normalized_ssd(sample, window, mask):
+    # window and mask are in the kernel shape
     wh, ww = window.shape
-    sh, sw = sample_size
 
     # Form a 2D Gaussian weight matrix from symmetric linearly separable Gaussian kernels and generate a 
     # strided view over this matrix.
     sigma = wh / SIGMA_COEFF
     kernel = cv2.getGaussianKernel(ksize=wh, sigma=sigma)
-    kernel_2d = kernel * kernel.T
+    kernel_2d = kernel * kernel.T * mask
 
+    # (a-b)^2 = a^2+b^2-2ab
+    ssd = cv2.filter2D(sample**2, ddepth=-1, kernel=kernel_2d) - 2*cv2.filter2D(sample, ddepth=-1, kernel=kernel_2d * window) + np.sum(window**2 * kernel_2d)
+    pad_size = wh // 2 # if kernel size = 5, this gives 2
+    ssd = ssd[pad_size:-pad_size, pad_size:-pad_size]
 
-    # Take the sum of squared differences over all sliding sample windows and weight it so that only existing neighbors
-    # contribute to error. Use the Gaussian kernel to weight central values more strongly than distant neighbors.
-    squared_differences = ((strided_sample - window)**2) * kernel_2d * mask
-    ssd = np.sum(squared_differences, axis=(1,2))
-    ssd = ssd.reshape(sh-wh+1, sw-ww+1)
-
-    # Normalize the SSD by the maximum possible contribution.
-    total_ssd = np.sum(mask * kernel_2d)
-    normalized_ssd = ssd / total_ssd
+    # Normalize the SSD by the maximum possible contribution. Clip negative values to zero
+    normalize_factor = np.sum(kernel_2d)
+    normalized_ssd = np.maximum(0, ssd / normalize_factor)
 
     return normalized_ssd
 
 def get_candidate_indices(normalized_ssd, error_threshold=ERROR_THRESHOLD):
-    min_ssd = np.min(normalized_ssd)
-    min_threshold = min_ssd * (1. + error_threshold)
+    min_non_zero_ssd = np.min(normalized_ssd[normalized_ssd != 0]) # take the minimum non-zero ssd value
+    min_threshold = min_non_zero_ssd * (1. + error_threshold)
     indices = np.where(normalized_ssd <= min_threshold)
     return indices
 
@@ -69,6 +66,7 @@ def select_pixel_index(normalized_ssd, indices, method='uniform'):
     if method == 'uniform':
         weights = np.ones(N) / float(N)
     else:
+        # this option does work now - due to ssd might be zero (clipped to zero from negative value)
         weights = normalized_ssd[indices]
         weights = weights / np.sum(weights)
 
@@ -167,19 +165,14 @@ def initialize_texture_synthesis(original_sample, window_size, kernel_size):
     window = padded_window[win:-win, win:-win]
     mask = padded_mask[win:-win, win:-win]
 
-    # Prepare sliding window views of the sample
-    strided_sample = np.lib.stride_tricks.as_strided(sample, shape=((sh-kernel_size+1), (sw-kernel_size+1), kernel_size, kernel_size), 
-                        strides=(sample.strides[0], sample.strides[1], sample.strides[0], sample.strides[1]))
-    strided_sample = strided_sample.reshape(-1, kernel_size, kernel_size)
-
-    return sample, window, mask, padded_window, padded_mask, result_window, strided_sample
+    return sample, window, mask, padded_window, padded_mask, result_window
     
 def synthesize_texture(original_sample, window_size, kernel_size, visualize):
 
     start_time = time.time()
     
     (sample, window, mask, padded_window, 
-        padded_mask, result_window, strided_sample) = initialize_texture_synthesis(original_sample, window_size, kernel_size)
+        padded_mask, result_window) = initialize_texture_synthesis(original_sample, window_size, kernel_size)
 
     end_time = time.time()
     execution_time = end_time - start_time
@@ -199,7 +192,7 @@ def synthesize_texture(original_sample, window_size, kernel_size, visualize):
             mask_slice = padded_mask[ch:ch+kernel_size, cw:cw+kernel_size]
 
             # Compute SSD for the current pixel neighborhood and select an index with low error.
-            ssd = normalized_ssd(sample.shape, strided_sample, window_slice, mask_slice)
+            ssd = find_normalized_ssd(sample, window_slice, mask_slice)
             indices = get_candidate_indices(ssd)
             selected_index = select_pixel_index(ssd, indices)
 
