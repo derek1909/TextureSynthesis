@@ -33,24 +33,10 @@ SIGMA_COEFF = 6.4      # The denominator for a 2D Gaussian sigma used in the ref
 ERROR_THRESHOLD = 0.1  # The default error threshold for synthesis acceptance in the reference implementation.
 
 
-def normalized_ssd(sample, window, mask):
+def normalized_ssd(sample_size, strided_sample, window, mask):
+    # window, mask and strided_sample are in the skernel shape
     wh, ww = window.shape
-    sh, sw = sample.shape
-
-    # Get sliding window views of the sample, window, and mask.
-    strided_sample = np.lib.stride_tricks.as_strided(sample, shape=((sh-wh+1), (sw-ww+1), wh, ww), 
-                        strides=(sample.strides[0], sample.strides[1], sample.strides[0], sample.strides[1]))
-    strided_sample = strided_sample.reshape(-1, wh, ww)
-
-    # Note that the window and mask views have the same shape as the strided sample, but the kernel is fixed
-    # rather than sliding for each of these components.
-    strided_window = np.lib.stride_tricks.as_strided(window, shape=((sh-wh+1), (sw-ww+1), wh, ww),
-                        strides=(0, 0, window.strides[0], window.strides[1]))
-    strided_window = strided_window.reshape(-1, wh, ww)
-
-    strided_mask = np.lib.stride_tricks.as_strided(mask, shape=((sh-wh+1), (sw-ww+1), wh, ww),
-                        strides=(0, 0, mask.strides[0], mask.strides[1]))
-    strided_mask = strided_mask.reshape(-1, wh, ww)
+    sh, sw = sample_size
 
     # Form a 2D Gaussian weight matrix from symmetric linearly separable Gaussian kernels and generate a 
     # strided view over this matrix.
@@ -58,13 +44,10 @@ def normalized_ssd(sample, window, mask):
     kernel = cv2.getGaussianKernel(ksize=wh, sigma=sigma)
     kernel_2d = kernel * kernel.T
 
-    strided_kernel = np.lib.stride_tricks.as_strided(kernel_2d, shape=((sh-wh+1), (sw-ww+1), wh, ww),
-                        strides=(0, 0, kernel_2d.strides[0], kernel_2d.strides[1]))
-    strided_kernel = strided_kernel.reshape(-1, wh, ww)
 
     # Take the sum of squared differences over all sliding sample windows and weight it so that only existing neighbors
     # contribute to error. Use the Gaussian kernel to weight central values more strongly than distant neighbors.
-    squared_differences = ((strided_sample - strided_window)**2) * strided_kernel * strided_mask
+    squared_differences = ((strided_sample - window)**2) * kernel_2d * mask
     ssd = np.sum(squared_differences, axis=(1,2))
     ssd = ssd.reshape(sh-wh+1, sw-ww+1)
 
@@ -134,7 +117,7 @@ def texture_can_be_synthesized(mask):
     return num_incomplete > 0
 
 def initialize_texture_synthesis(original_sample, window_size, kernel_size):
-    # Convert original to sample representation.
+    # Convert original to sample representation (BGR color to gray scale).
     sample = cv2.cvtColor(original_sample, cv2.COLOR_BGR2GRAY)
     
     # Convert sample to floating point and normalize to the range [0., 1.]
@@ -146,15 +129,18 @@ def initialize_texture_synthesis(original_sample, window_size, kernel_size):
 
     # Generate output window
     if original_sample.ndim == 2:
+        # If original sample is gray scale
         result_window = np.zeros_like(window, dtype=np.uint8)
     else:
+        # If original sample is RGB: output (h,w,3)
         result_window = np.zeros(window_size + (3,), dtype=np.uint8)
 
-    # Generate window mask
+    # Generate window mask to keep track of the areas in the window that have been filled.
     h, w = window.shape
     mask = np.zeros((h, w), dtype=np.float64)
 
     # Initialize window with random seed from sample
+    # seed = a random 3x3 patch
     sh, sw = original_sample.shape[:2]
     ih = np.random.randint(sh-3+1)
     iw = np.random.randint(sw-3+1)
@@ -167,6 +153,7 @@ def initialize_texture_synthesis(original_sample, window_size, kernel_size):
     result_window[ph:ph+3, pw:pw+3] = original_sample[ih:ih+3, iw:iw+3]
 
     # Obtain padded versions of window and mask
+    # (Adds padding around the window and mask to handle border effects during convolution or sliding window operations.)
     win = kernel_size//2
     padded_window = cv2.copyMakeBorder(window, 
                                        top=win, bottom=win, left=win, right=win, borderType=cv2.BORDER_CONSTANT, value=0.)
@@ -177,15 +164,19 @@ def initialize_texture_synthesis(original_sample, window_size, kernel_size):
     window = padded_window[win:-win, win:-win]
     mask = padded_mask[win:-win, win:-win]
 
-    return sample, window, mask, padded_window, padded_mask, result_window
+    # Prepare sliding window views of the sample
+    strided_sample = np.lib.stride_tricks.as_strided(sample, shape=((sh-kernel_size+1), (sw-kernel_size+1), kernel_size, kernel_size), 
+                        strides=(sample.strides[0], sample.strides[1], sample.strides[0], sample.strides[1]))
+    strided_sample = strided_sample.reshape(-1, kernel_size, kernel_size)
+
+    return sample, window, mask, padded_window, padded_mask, result_window, strided_sample
     
 def synthesize_texture(original_sample, window_size, kernel_size, visualize):
-    global gif_count
 
     start_time = time.time()
     
     (sample, window, mask, padded_window, 
-        padded_mask, result_window) = initialize_texture_synthesis(original_sample, window_size, kernel_size)
+        padded_mask, result_window, strided_sample) = initialize_texture_synthesis(original_sample, window_size, kernel_size)
 
     end_time = time.time()
     execution_time = end_time - start_time
@@ -193,10 +184,10 @@ def synthesize_texture(original_sample, window_size, kernel_size, visualize):
 
     # Synthesize texture until all pixels in the window are filled.
     while texture_can_be_synthesized(mask):
-        # Get neighboring indices
+        # Get neighboring indices that are neighbors of the already synthesized pixels
         neighboring_indices = get_neighboring_pixel_indices(mask)
 
-        # Permute and sort neighboring indices by quantity of 8-connected neighbors.
+        # Permute and sort neighboring indices by number of sythesised pixels in 8-connected neighbors.
         neighboring_indices = permute_neighbors(mask, neighboring_indices)
         
         for ch, cw in zip(neighboring_indices[0], neighboring_indices[1]):
@@ -205,7 +196,7 @@ def synthesize_texture(original_sample, window_size, kernel_size, visualize):
             mask_slice = padded_mask[ch:ch+kernel_size, cw:cw+kernel_size]
 
             # Compute SSD for the current pixel neighborhood and select an index with low error.
-            ssd = normalized_ssd(sample, window_slice, mask_slice)
+            ssd = normalized_ssd(sample.shape, strided_sample, window_slice, mask_slice)
             indices = get_candidate_indices(ssd)
             selected_index = select_pixel_index(ssd, indices)
 
