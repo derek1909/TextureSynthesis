@@ -156,11 +156,14 @@ def initialize_texture_synthesis(original_sample, window_size, kernel_size):
     # (Adds padding around the window and mask to handle border effects during convolution or sliding window operations.)
     win = kernel_size//2
     padded_window = cv2.copyMakeBorder(window, 
-                                       top=win, bottom=win, left=win, right=win, borderType=cv2.BORDER_CONSTANT, value=0.)
+                                       top=win, bottom=win, left=win, right=win, 
+                                       borderType=cv2.BORDER_CONSTANT, value=0.)
     padded_mask = cv2.copyMakeBorder(mask,
-                                     top=win, bottom=win, left=win, right=win, borderType=cv2.BORDER_CONSTANT, value=0.)
+                                     top=win, bottom=win, left=win, right=win, 
+                                     borderType=cv2.BORDER_CONSTANT, value=0.)
     
     # Obtain views of the padded window and mask
+    ## window and padded_window, mask and padded_mask are linked!!!
     window = padded_window[win:-win, win:-win]
     mask = padded_mask[win:-win, win:-win]
 
@@ -204,6 +207,7 @@ def synthesize_texture(original_sample, window_size, kernel_size, visualize):
             selected_index = (selected_index[0] + kernel_size // 2, selected_index[1] + kernel_size // 2)
 
             # Set windows and mask.
+            # This will update padded_window and padded_mask as well
             window[ch, cw] = sample[selected_index]
             mask[ch, cw] = 1
             result_window[ch, cw] = original_sample[selected_index[0], selected_index[1]]
