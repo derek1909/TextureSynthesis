@@ -24,6 +24,7 @@ __author__ = 'Maxwell Goldberg'
 import argparse
 import cv2
 import numpy as np
+import time
 
 EIGHT_CONNECTED_NEIGHBOR_KERNEL = np.array([[1., 1., 1.],
                                             [1., 0., 1.],
@@ -180,8 +181,15 @@ def initialize_texture_synthesis(original_sample, window_size, kernel_size):
     
 def synthesize_texture(original_sample, window_size, kernel_size, visualize):
     global gif_count
+
+    start_time = time.time()
+    
     (sample, window, mask, padded_window, 
         padded_mask, result_window) = initialize_texture_synthesis(original_sample, window_size, kernel_size)
+
+    end_time = time.time()
+    execution_time = end_time - start_time
+    print(f'Initialization finished. Time used: {execution_time:.1f}s')
 
     # Synthesize texture until all pixels in the window are filled.
     while texture_can_be_synthesized(mask):
@@ -221,6 +229,10 @@ def synthesize_texture(original_sample, window_size, kernel_size, visualize):
         cv2.waitKey(0)
         cv2.destroyAllWindows()
 
+    end_time = time.time()
+    execution_time = end_time - start_time
+
+    print(f'Synthesis finished. Time used: {execution_time:.1f}s')
     return result_window
 
 
