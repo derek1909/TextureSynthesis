@@ -43,8 +43,8 @@ def find_normalized_ssd(sample, window, mask):
     wh, ww = window.shape
     # Form a 2D Gaussian weight matrix from symmetric linearly separable Gaussian kernels
     sigma = wh / SIGMA_COEFF
-    kernel_1d = torch.exp(-torch.arange(wh, device=device, dtype=torch.float64)**2 / (2 * sigma**2))
-    kernel_1d[wh//2] = 0
+    x = torch.arange(wh, device=device, dtype=torch.float64)
+    kernel_1d = torch.exp(- (x-(wh-1)/2)**2 / (2 * sigma**2))
     kernel_1d = kernel_1d / kernel_1d.sum()  # Normalize the kernel
     kernel_2d = kernel_1d[:, None] @ kernel_1d[None, :] * mask
 
