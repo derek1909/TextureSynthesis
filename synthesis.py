@@ -25,53 +25,62 @@ import argparse
 import cv2
 import numpy as np
 import time
+import torch
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+# Check if CUDA is available
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-EIGHT_CONNECTED_NEIGHBOR_KERNEL = np.array([[1., 1., 1.],
-                                            [1., 0., 1.],
-                                            [1., 1., 1.]], dtype=np.float64)
+EIGHT_CONNECTED_NEIGHBOR_KERNEL = torch.tensor([[1., 1., 1.],
+                                               [1., 0., 1.],
+                                               [1., 1., 1.]], dtype=torch.float64, device=device)
 SIGMA_COEFF = 6.4      # The denominator for a 2D Gaussian sigma used in the reference implementation.
 ERROR_THRESHOLD = 0.1  # The default error threshold for synthesis acceptance in the reference implementation.
 
 
 def find_normalized_ssd(sample, window, mask):
-    # window and mask are in the kernel shape
+    # Get the kernel size and create the Gaussian kernel
     wh, ww = window.shape
-
-    # Form a 2D Gaussian weight matrix from symmetric linearly separable Gaussian kernels and generate a 
-    # strided view over this matrix.
+    # Form a 2D Gaussian weight matrix from symmetric linearly separable Gaussian kernels
     sigma = wh / SIGMA_COEFF
-    kernel = cv2.getGaussianKernel(ksize=wh, sigma=sigma)
-    kernel_2d = kernel * kernel.T * mask
+    kernel_1d = torch.exp(-torch.arange(wh, device=device, dtype=torch.float64)**2 / (2 * sigma**2))
+    kernel_1d[wh//2] = 0
+    kernel_1d = kernel_1d / kernel_1d.sum()  # Normalize the kernel
+    kernel_2d = kernel_1d[:, None] @ kernel_1d[None, :] * mask
 
+    # Apply convolution to compute SSD
     # (a-b)^2 = a^2+b^2-2ab
-    ssd = cv2.filter2D(sample**2, ddepth=-1, kernel=kernel_2d) - 2*cv2.filter2D(sample, ddepth=-1, kernel=kernel_2d * window) + np.sum(window**2 * kernel_2d)
-    pad_size = wh // 2 # if kernel size = 5, this gives 2
-    ssd = ssd[pad_size:-pad_size, pad_size:-pad_size]
+    sample = sample.unsqueeze(0).unsqueeze(0)
+    window = window.unsqueeze(0).unsqueeze(0)
+    kernel_2d = kernel_2d.unsqueeze(0).unsqueeze(0)
+    ssd= F.conv2d(sample**2, kernel_2d) - 2 * F.conv2d(sample, kernel_2d * window) + (window**2 * kernel_2d).sum()
+    ssd = ssd.squeeze().squeeze()
+    # Normalize the SSD
+    normalize_factor = kernel_2d.sum().item()
+    normalized_ssd = torch.maximum(torch.tensor(0.0), ssd / normalize_factor)
 
-    # Normalize the SSD by the maximum possible contribution. Clip negative values to zero
-    normalize_factor = np.sum(kernel_2d)
-    normalized_ssd = np.maximum(0, ssd / normalize_factor)
-
+    # plt.imshow(normalized_ssd.squeeze().squeeze().cpu().numpy())
+    # error
     return normalized_ssd
 
 def get_candidate_indices(normalized_ssd, error_threshold=ERROR_THRESHOLD):
-    min_non_zero_ssd = np.min(normalized_ssd[normalized_ssd != 0]) # take the minimum non-zero ssd value
+    min_non_zero_ssd = normalized_ssd[normalized_ssd > 0].min() # Get the minimum non-zero SSD value
     min_threshold = min_non_zero_ssd * (1. + error_threshold)
-    indices = np.where(normalized_ssd <= min_threshold)
+    indices = torch.nonzero(normalized_ssd <= min_threshold, as_tuple=True)
     return indices
 
 def select_pixel_index(normalized_ssd, indices, method='uniform'):
     N = indices[0].shape[0]
 
     if method == 'uniform':
-        weights = np.ones(N) / float(N)
+        weights = torch.ones(N) / N
     else:
         # this option does work now - due to ssd might be zero (clipped to zero from negative value)
         weights = normalized_ssd[indices]
-        weights = weights / np.sum(weights)
+        weights = weights / torch.sum(weights)
 
-    # Select a random pixel index from the index list.
-    selection = np.random.choice(np.arange(N), size=1, p=weights)
+    # Select a random pixel index based on weights
+    selection = torch.multinomial(weights, 1).item()
     selected_index = (indices[0][selection], indices[1][selection])
     
     return selected_index
@@ -79,37 +88,49 @@ def select_pixel_index(normalized_ssd, indices, method='uniform'):
 def get_neighboring_pixel_indices(pixel_mask):
     # Taking the difference between the dilated mask and the initial mask
     # gives only the 8-connected neighbors of the mask frontier.
-    kernel = np.ones((3,3))
-    dilated_mask = cv2.dilate(pixel_mask, kernel, iterations=1)
+    kernel = torch.ones((3, 3), dtype=torch.float64, device=device)
+    dilated_mask = F.conv2d(pixel_mask.unsqueeze(0).unsqueeze(0), 
+                            kernel.unsqueeze(0).unsqueeze(0), padding='same') 
+    dilated_mask = (dilated_mask > 0).float() # make it binary
+    dilated_mask = dilated_mask.squeeze(0).squeeze(0)
+
     neighbors = dilated_mask - pixel_mask
 
     # Recover the indices of the mask frontier.
-    neighbor_indices = np.nonzero(neighbors)
+    neighbor_indices = torch.nonzero(neighbors)
 
     return neighbor_indices
 
 def permute_neighbors(pixel_mask, neighbors):
-    N = neighbors[0].shape[0]
+    # neighbors: (N,2)
 
-    # Generate a permutation of the neigboring indices
-    permuted_indices = np.random.permutation(np.arange(N))
-    permuted_neighbors = (neighbors[0][permuted_indices], neighbors[1][permuted_indices])
+    # Generate a permutation of the neighboring indices
+    permuted_indices = torch.randperm(neighbors.shape[0])
+    permuted_neighbors = neighbors[permuted_indices,:]
+
 
     # Use convolution to count the number of existing neighbors for all entries in the mask.
-    neighbor_count = cv2.filter2D(pixel_mask, ddepth=-1, kernel=EIGHT_CONNECTED_NEIGHBOR_KERNEL, borderType=cv2.BORDER_CONSTANT)
+    neighbor_count = F.conv2d(pixel_mask.unsqueeze(0).unsqueeze(0), 
+                              EIGHT_CONNECTED_NEIGHBOR_KERNEL.unsqueeze(0).unsqueeze(0), padding='same')
+    neighbor_count = neighbor_count.squeeze().squeeze()
 
+    # print('neighbor_count',neighbor_count.shape)
     # Sort the permuted neighboring indices by quantity of existing neighbors descending.
-    permuted_neighbor_counts = neighbor_count[permuted_neighbors]
+    permuted_neighbor_counts = neighbor_count[permuted_neighbors[:, 0], permuted_neighbors[:, 1]]
 
-    sorted_order = np.argsort(permuted_neighbor_counts)[::-1]
-    permuted_neighbors = (permuted_neighbors[0][sorted_order], permuted_neighbors[1][sorted_order])
+    # print('permuted_neighbors1',permuted_neighbors)
+
+    sorted_order = torch.argsort(permuted_neighbor_counts, descending=True)
+    # print('sorted_order',sorted_order)
+    permuted_neighbors = permuted_neighbors[sorted_order,:]
+    # print('permuted_neighbors2',permuted_neighbors)
 
     return permuted_neighbors
 
 def texture_can_be_synthesized(mask):
     # The texture can be synthesized while the mask has unfilled entries.
     mh, mw = mask.shape[:2]
-    num_completed = np.count_nonzero(mask)
+    num_completed = torch.sum(mask != 0).item()
     num_incomplete = (mh * mw) - num_completed
     
     return num_incomplete > 0
@@ -122,8 +143,11 @@ def initialize_texture_synthesis(original_sample, window_size, kernel_size):
     sample = sample.astype(np.float64)
     sample = sample / 255.
 
-    # Generate window
-    window = np.zeros(window_size, dtype=np.float64)
+    sample =  torch.tensor(sample,device=device) # (BatchSize, Channels, H, W) = (1, 1, 530, 530)
+
+    # Generate window and mask
+    window = torch.zeros(window_size, dtype=torch.float64, device=device)
+    mask = torch.zeros(window_size, dtype=torch.float64, device=device)
 
     # Generate output window
     if original_sample.ndim == 2:
@@ -133,10 +157,6 @@ def initialize_texture_synthesis(original_sample, window_size, kernel_size):
         # If original sample is RGB: output (h,w,3)
         result_window = np.zeros(window_size + (3,), dtype=np.uint8)
 
-    # Generate window mask to keep track of the areas in the window that have been filled.
-    h, w = window.shape
-    mask = np.zeros((h, w), dtype=np.float64)
-
     # Initialize window with random seed from sample
     # seed = a random 3x3 patch
     sh, sw = original_sample.shape[:2]
@@ -145,25 +165,20 @@ def initialize_texture_synthesis(original_sample, window_size, kernel_size):
     seed = sample[ih:ih+3, iw:iw+3]
 
     # Place seed in center of window
-    ph, pw = (h//2)-1, (w//2)-1
+    ph, pw = (window_size[0] // 2) - 1, (window_size[1] // 2) - 1
     window[ph:ph+3, pw:pw+3] = seed
     mask[ph:ph+3, pw:pw+3] = 1
     result_window[ph:ph+3, pw:pw+3] = original_sample[ih:ih+3, iw:iw+3]
+    # print('original_sample[ih:ih+3, iw:iw+3]',original_sample[ih:ih+3, iw:iw+3].shape)
 
+    # error
     # Obtain padded versions of window and mask
-    # (Adds padding around the window and mask to handle border effects during convolution or sliding window operations.)
-    win = kernel_size//2
-    padded_window = cv2.copyMakeBorder(window, 
-                                       top=win, bottom=win, left=win, right=win, 
-                                       borderType=cv2.BORDER_CONSTANT, value=0.)
-    padded_mask = cv2.copyMakeBorder(mask,
-                                     top=win, bottom=win, left=win, right=win, 
-                                     borderType=cv2.BORDER_CONSTANT, value=0.)
-    
+    pad = kernel_size // 2
+    padded_window = torch.nn.functional.pad(window, pad=(pad, pad, pad, pad), mode='constant', value=0)
+    padded_mask = torch.nn.functional.pad(mask, pad=(pad, pad, pad, pad), mode='constant', value=0)
     # Obtain views of the padded window and mask
-    ## window and padded_window, mask and padded_mask are linked!!!
-    window = padded_window[win:-win, win:-win]
-    mask = padded_mask[win:-win, win:-win]
+    window = padded_window[pad:-pad, pad:-pad]
+    mask = padded_mask[pad:-pad, pad:-pad]
 
     return sample, window, mask, padded_window, padded_mask, result_window
     
@@ -186,8 +201,8 @@ def synthesize_texture(original_sample, window_size, kernel_size, visualize):
         # Permute and sort neighboring indices by number of sythesised pixels in 8-connected neighbors.
         neighboring_indices = permute_neighbors(mask, neighboring_indices)
         
-        for ch, cw in zip(neighboring_indices[0], neighboring_indices[1]):
-
+        for i in range(neighboring_indices.shape[0]):
+            ch, cw = neighboring_indices[i]
             window_slice = padded_window[ch:ch+kernel_size, cw:cw+kernel_size]
             mask_slice = padded_mask[ch:ch+kernel_size, cw:cw+kernel_size]
 
@@ -205,6 +220,7 @@ def synthesize_texture(original_sample, window_size, kernel_size, visualize):
             mask[ch, cw] = 1
             result_window[ch, cw] = original_sample[selected_index[0], selected_index[1]]
 
+            # print('padded_mask',padded_mask)
             if visualize:
                 cv2.imshow('synthesis window', result_window)
                 key = cv2.waitKey(1) 
