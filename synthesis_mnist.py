@@ -77,6 +77,7 @@ def select_pixel_index(normalized_ssd, indices, method='uniform'):
         # this option does work now - due to ssd might be zero (clipped to zero from negative value)
         weights = normalized_ssd[indices]
         weights = weights / torch.sum(weights)
+    print('num of selection pool', N)
 
     # Select a random pixel index based on weights
     selection = torch.multinomial(weights, 1).item()
@@ -136,11 +137,8 @@ def texture_can_be_synthesized(mask):
 
 def initialize_texture_synthesis(sample, window_size, kernel_size):
 
-    sample = sample.to(dtype=torch.float64,device=device) # (BatchSize, Channels, H, W) = (1, 1, 530, 530)
-
-    # Generate working window, output window and mask
+    # Generate window and mask
     window = torch.zeros(window_size, dtype=torch.float64, device=device)
-    result_window = torch.zeros_like(window, dtype=torch.uint8, device=device)
     mask = torch.zeros(window_size, dtype=torch.float64, device=device)
 
     # Initialize window with random seed from sample
@@ -148,21 +146,22 @@ def initialize_texture_synthesis(sample, window_size, kernel_size):
     sx, sy, sh, sw = sample.shape
     ix = torch.randint(0, sx, (1,))
     iy = torch.randint(0, sy, (1,))
-    # ih = torch.randint(0, sh-3+1, (1,))
-    # iw = torch.randint(0, sw-3+1, (1,))
+    ih = torch.randint(0, sh-3+1, (1,))
+    iw = torch.randint(0, sw-3+1, (1,))
+    
+    # select a central seed
+    # ih, iw = (window_size[0] // 2) - 1, (window_size[1] // 2) - 1
 
-    ih = 12
-    iw = 12
     seed = sample[ix, iy, ih:ih+3, iw:iw+3]
+    plt.figure()
+    plt.imshow(seed.squeeze().cpu(), vmin=0, vmax=1, cmap='grey')
+    plt.title('seed')
 
     # Place seed in center of window
     ph, pw = (window_size[0] // 2) - 1, (window_size[1] // 2) - 1
     window[ph:ph+3, pw:pw+3] = seed
     mask[ph:ph+3, pw:pw+3] = 1
-    result_window[ph:ph+3, pw:pw+3] = sample[ix, iy, ih:ih+3, iw:iw+3]
-    # print('original_sample[ih:ih+3, iw:iw+3]',original_sample[ih:ih+3, iw:iw+3].shape)
 
-    # error
     # Obtain padded versions of window and mask
     pad = kernel_size // 2
     padded_window = torch.nn.functional.pad(window, pad=(pad, pad, pad, pad), mode='constant', value=0)
@@ -170,15 +169,15 @@ def initialize_texture_synthesis(sample, window_size, kernel_size):
     # Obtain views of the padded window and mask
     window = padded_window[pad:-pad, pad:-pad]
     mask = padded_mask[pad:-pad, pad:-pad]
-
-    return sample, window, mask, padded_window, padded_mask, result_window
+    return window, mask, padded_window, padded_mask
     
-def synthesize_texture(original_sample, window_size, kernel_size, visualize):
+def synthesize_texture(sample, window_size, kernel_size, visualize):
 
     start_time = time.time()
+
+    sample = sample.to(dtype=torch.float64,device=device)
     
-    (sample, window, mask, padded_window, 
-        padded_mask, result_window) = initialize_texture_synthesis(original_sample, window_size, kernel_size)
+    (window, mask, padded_window, padded_mask) = initialize_texture_synthesis(sample, window_size, kernel_size)
 
     # end_time = time.time()
     # execution_time = end_time - start_time
@@ -212,7 +211,6 @@ def synthesize_texture(original_sample, window_size, kernel_size, visualize):
             # This will update padded_window and padded_mask as well
             window[ch, cw] = sample[selected_index]
             mask[ch, cw] = 1
-            result_window[ch, cw] = original_sample[selected_index[0], selected_index[1], selected_index[2], selected_index[3]]
 
     #         if visualize:
     #             cv2.imshow('synthesis window', result_window)
@@ -230,4 +228,4 @@ def synthesize_texture(original_sample, window_size, kernel_size, visualize):
     execution_time = end_time - start_time
 
     print(f'Synthesis finished. Time used: {execution_time:.1f}s')
-    return result_window
+    return window
