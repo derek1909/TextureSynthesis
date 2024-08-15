@@ -21,7 +21,7 @@ Example:
 
 __author__ = 'Derek Dong'
 
-import argparse
+# import argparse
 # import cv2
 # import numpy as np
 import time
@@ -66,6 +66,9 @@ def get_candidate_indices(normalized_ssd, error_threshold=ERROR_THRESHOLD):
     min_non_zero_ssd = normalized_ssd[normalized_ssd > 0].min() # Get the minimum non-zero SSD value
     min_threshold = min_non_zero_ssd * (1. + error_threshold)
     indices = torch.nonzero(normalized_ssd <= min_threshold, as_tuple=True)
+    # print('min_non_zero_ssd',min_non_zero_ssd)
+    # print('min_threshold',min_threshold)
+
     return indices
 
 def select_pixel_index(normalized_ssd, indices, method='uniform'):
@@ -77,7 +80,7 @@ def select_pixel_index(normalized_ssd, indices, method='uniform'):
         # this option does work now - due to ssd might be zero (clipped to zero from negative value)
         weights = normalized_ssd[indices]
         weights = weights / torch.sum(weights)
-    print('num of selection pool', N)
+    # print('num of selection pool', N)
 
     # Select a random pixel index based on weights
     selection = torch.multinomial(weights, 1).item()
@@ -135,7 +138,7 @@ def texture_can_be_synthesized(mask):
     
     return num_incomplete > 0
 
-def initialize_texture_synthesis(sample, window_size, kernel_size):
+def initialize_texture_synthesis(sample, window_size, kernel_size, seed_size=3):
 
     # Generate window and mask
     window = torch.zeros(window_size, dtype=torch.float64, device=device)
@@ -146,21 +149,23 @@ def initialize_texture_synthesis(sample, window_size, kernel_size):
     sx, sy, sh, sw = sample.shape
     ix = torch.randint(0, sx, (1,))
     iy = torch.randint(0, sy, (1,))
-    ih = torch.randint(0, sh-3+1, (1,))
-    iw = torch.randint(0, sw-3+1, (1,))
+    # ih = torch.randint(0, sh-seed_size+1, (1,))
+    # iw = torch.randint(0, sw-seed_size+1, (1,))
     
+    ih, iw = (sh - seed_size + 1) // 2, (sw - seed_size + 1) // 2
+
     # select a central seed
     # ih, iw = (window_size[0] // 2) - 1, (window_size[1] // 2) - 1
 
-    seed = sample[ix, iy, ih:ih+3, iw:iw+3]
+    seed = sample[ix, iy, ih:ih+seed_size, iw:iw+seed_size]
     plt.figure()
     plt.imshow(seed.squeeze().cpu(), vmin=0, vmax=1, cmap='grey')
     plt.title('seed')
 
     # Place seed in center of window
-    ph, pw = (window_size[0] // 2) - 1, (window_size[1] // 2) - 1
-    window[ph:ph+3, pw:pw+3] = seed
-    mask[ph:ph+3, pw:pw+3] = 1
+    ph, pw = (window_size[0] - seed_size + 1) // 2, (window_size[1] - seed_size + 1) // 2
+    window[ph:ph+seed_size, pw:pw+seed_size] = seed
+    mask[ph:ph+seed_size, pw:pw+seed_size] = 1
 
     # Obtain padded versions of window and mask
     pad = kernel_size // 2
@@ -171,13 +176,13 @@ def initialize_texture_synthesis(sample, window_size, kernel_size):
     mask = padded_mask[pad:-pad, pad:-pad]
     return window, mask, padded_window, padded_mask
     
-def synthesize_texture(sample, window_size, kernel_size, visualize):
+def synthesize_texture(sample, window_size, kernel_size, seed_size):
 
     start_time = time.time()
 
     sample = sample.to(dtype=torch.float64,device=device)
     
-    (window, mask, padded_window, padded_mask) = initialize_texture_synthesis(sample, window_size, kernel_size)
+    (window, mask, padded_window, padded_mask) = initialize_texture_synthesis(sample, window_size, kernel_size, seed_size)
 
     # end_time = time.time()
     # execution_time = end_time - start_time
