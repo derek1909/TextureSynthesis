@@ -54,7 +54,7 @@ def find_normalized_ssd(sample, window, mask):
     sample = sample.unsqueeze(0).unsqueeze(0)
     window = window.unsqueeze(0).unsqueeze(0)
     kernel_2d = kernel_2d.unsqueeze(0).unsqueeze(0)
-    ssd= F.conv2d(sample**2, kernel_2d) - 2 * F.conv2d(sample, kernel_2d * window) + (window**2 * kernel_2d).sum()
+    ssd= F.conv2d(sample**2, kernel_2d, padding='same') - 2 * F.conv2d(sample, kernel_2d * window, padding='same') + (window**2 * kernel_2d).sum()
     ssd = ssd.squeeze().squeeze()
     # Normalize the SSD
     normalize_factor = kernel_2d.sum().item()
@@ -213,7 +213,7 @@ def synthesize_texture(original_sample, window_size, kernel_size, visualize):
             selected_index = select_pixel_index(ssd, indices)
 
             # Translate index to accommodate padding.
-            selected_index = (selected_index[0] + kernel_size // 2, selected_index[1] + kernel_size // 2)
+            # selected_index = (selected_index[0] + kernel_size // 2, selected_index[1] + kernel_size // 2)
 
             # Set windows and mask.
             # This will update padded_window and padded_mask as well

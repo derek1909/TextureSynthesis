@@ -39,13 +39,15 @@ SIGMA_COEFF = 6.4      # The denominator for a 2D Gaussian sigma used in the ref
 ERROR_THRESHOLD = 0.1  # The default error threshold for synthesis acceptance in the reference implementation.
 
 
-def find_normalized_ssd(sample, window, mask):
+def find_normalized_ssd(sample, window, mask, window_index):
     # Get the kernel size and create the Gaussian kernel
-    wh, ww = window.shape
+    kernel_size, _ = window.shape
+    _, _, sh, sw = sample.shape
+
     # Form a 2D Gaussian weight matrix from symmetric linearly separable Gaussian kernels
-    sigma = wh / SIGMA_COEFF
-    x = torch.arange(wh, device=device, dtype=torch.float64)
-    kernel_1d = torch.exp(- (x-(wh-1)/2)**2 / (2 * sigma**2))
+    sigma = kernel_size / SIGMA_COEFF
+    x = torch.arange(kernel_size, device=device, dtype=torch.float64)
+    kernel_1d = torch.exp(- (x-(kernel_size-1)/2)**2 / (2 * sigma**2))
     kernel_1d = kernel_1d / kernel_1d.sum()  # Normalize the kernel
     kernel_2d = kernel_1d[:, None] @ kernel_1d[None, :] * mask
 
@@ -53,14 +55,47 @@ def find_normalized_ssd(sample, window, mask):
     # (a-b)^2 = a^2+b^2-2ab
     window = window.unsqueeze(0).unsqueeze(0)
     kernel_2d = kernel_2d.unsqueeze(0).unsqueeze(0)
-    ssd= F.conv2d(sample**2, kernel_2d) - 2 * F.conv2d(sample, kernel_2d * window) + (window**2 * kernel_2d).sum()
+
+    # ssd has same shape with sample
+    ssd = F.conv2d(sample**2, kernel_2d, padding='same') - 2 * F.conv2d(sample, kernel_2d * window, padding='same') + (window**2 * kernel_2d).sum()
+    # print('ssd', ssd.shape)
+
     # Normalize the SSD
     normalize_factor = kernel_2d.sum().item()
     normalized_ssd = torch.maximum(torch.tensor(0.0), ssd / normalize_factor)
 
+    # Add position penalty
+    h_indices, w_indices = torch.meshgrid(torch.arange(sh, device=device), torch.arange(sw, device=device), indexing='ij')
+    # plt.figure()
+    # plt.imshow(w_indices)
+    # plt.title('w')
+    # plt.figure()
+    # plt.imshow(h_indices)
+    # plt.title('h')
+    # window_index = (20, 1)
+
+    position_penalty = ((h_indices - window_index[0])**2 + (w_indices - window_index[1])**2)**2 # A magic number - to be change to a constant
+
+    # distance_square = (h_indices - window_index[0])**2 + (w_indices - window_index[1])**2
+    # position_penalty = torch.exp(distance_square / (2 * sigma**2))
+
+    # print('position_penalty', position_penalty.shape)
+
+    # plt.figure()
+    # plt.imshow(position_penalty.cpu())
+    # plt.title('position_penalty')
+    # error
+    # print('position_penalty', position_penalty.shape)
+
+
+    normalized_positional_ssd = normalized_ssd * position_penalty
+    # normalized_positional_ssd = normalized_ssd + position_penalty*1e-4
+
+
+    # print('normalized_positional_ssd', normalized_positional_ssd.shape)
     # plt.imshow(normalized_ssd.squeeze().squeeze().cpu().numpy())
     # error
-    return normalized_ssd
+    return normalized_positional_ssd
 
 def get_candidate_indices(normalized_ssd, error_threshold=ERROR_THRESHOLD):
     min_non_zero_ssd = normalized_ssd[normalized_ssd > 0].min() # Get the minimum non-zero SSD value
@@ -68,24 +103,37 @@ def get_candidate_indices(normalized_ssd, error_threshold=ERROR_THRESHOLD):
     indices = torch.nonzero(normalized_ssd <= min_threshold, as_tuple=True)
     # print('min_non_zero_ssd',min_non_zero_ssd)
     # print('min_threshold',min_threshold)
-
+    # print('indices',indices.shape)
+    
+    # indices = (tensor containing indices of first axis, tensor containing indices of second axis, tensor containing indices of third axis, tensor containing indices of forth axis)
     return indices
 
 def select_pixel_index(normalized_ssd, indices, method='uniform'):
     N = indices[0].shape[0]
+    print('num of selection pool', N)
 
     if method == 'uniform':
         weights = torch.ones(N) / N
+        # selection = torch.randint(0, N, (1,)).item()
+        selection = torch.multinomial(weights, 1).item()
+
     else:
         # this option does work now - due to ssd might be zero (clipped to zero from negative value)
         weights = normalized_ssd[indices]
         weights = weights / torch.sum(weights)
-    # print('num of selection pool', N)
+        selection = torch.multinomial(weights, 1).item()
+
+    # accccf = normalized_ssd[indices]
+    # print(accccf.shape)
 
     # Select a random pixel index based on weights
-    selection = torch.multinomial(weights, 1).item()
-    selected_index = (indices[0][selection], indices[1][selection], indices[2][selection], indices[3][selection])
-    
+    # print('selection', selection)
+    # print()
+    selected_index = tuple(index[selection] for index in indices)
+    # print('selected_index',selected_index)
+    # print('indices[:][selection]',indices[:][selection])
+    # print('tuple(index[selection] for index in indices)',tuple(index[selection] for index in indices))
+
     return selected_index
 
 def get_neighboring_pixel_indices(pixel_mask):
@@ -138,7 +186,7 @@ def texture_can_be_synthesized(mask):
     
     return num_incomplete > 0
 
-def initialize_texture_synthesis(sample, window_size, kernel_size, seed_size=3):
+def initialize_texture_synthesis(test_sample, window_size, kernel_size, seed_size=3):
 
     # Generate window and mask
     window = torch.zeros(window_size, dtype=torch.float64, device=device)
@@ -146,21 +194,21 @@ def initialize_texture_synthesis(sample, window_size, kernel_size, seed_size=3):
 
     # Initialize window with random seed from sample
     # seed = a random 3x3 patch
-    sx, sy, sh, sw = sample.shape
+    sx, sy, sh, sw = test_sample.shape
     ix = torch.randint(0, sx, (1,))
     iy = torch.randint(0, sy, (1,))
     # ih = torch.randint(0, sh-seed_size+1, (1,))
     # iw = torch.randint(0, sw-seed_size+1, (1,))
-    
     ih, iw = (sh - seed_size + 1) // 2, (sw - seed_size + 1) // 2
 
     # select a central seed
     # ih, iw = (window_size[0] // 2) - 1, (window_size[1] // 2) - 1
 
-    seed = sample[ix, iy, ih:ih+seed_size, iw:iw+seed_size]
+    seed = test_sample[ix, iy, ih:ih+seed_size, iw:iw+seed_size]
+    original_image = test_sample[ix, iy, :, :]
     plt.figure()
-    plt.imshow(seed.squeeze().cpu(), vmin=0, vmax=1, cmap='grey')
-    plt.title('seed')
+    plt.imshow(original_image.squeeze().cpu(), vmin=0, vmax=1, cmap='grey')
+    plt.title('original image')
 
     # Place seed in center of window
     ph, pw = (window_size[0] - seed_size + 1) // 2, (window_size[1] - seed_size + 1) // 2
@@ -176,13 +224,13 @@ def initialize_texture_synthesis(sample, window_size, kernel_size, seed_size=3):
     mask = padded_mask[pad:-pad, pad:-pad]
     return window, mask, padded_window, padded_mask
     
-def synthesize_texture(sample, window_size, kernel_size, seed_size):
+def synthesize_texture(sample, test_sample, window_size, kernel_size, seed_size):
 
     start_time = time.time()
 
     sample = sample.to(dtype=torch.float64,device=device)
     
-    (window, mask, padded_window, padded_mask) = initialize_texture_synthesis(sample, window_size, kernel_size, seed_size)
+    (window, mask, padded_window, padded_mask) = initialize_texture_synthesis(test_sample, window_size, kernel_size, seed_size)
 
     # end_time = time.time()
     # execution_time = end_time - start_time
@@ -200,17 +248,22 @@ def synthesize_texture(sample, window_size, kernel_size, seed_size):
             ch, cw = neighboring_indices[i]
             window_slice = padded_window[ch:ch+kernel_size, cw:cw+kernel_size]
             mask_slice = padded_mask[ch:ch+kernel_size, cw:cw+kernel_size]
+            
+            # Translate index to accommodate padding.
+            window_index = (ch + kernel_size // 2, cw + kernel_size // 2)
 
             # Compute SSD for the current pixel neighborhood and select an index with low error.
-            ssd = find_normalized_ssd(sample, window_slice, mask_slice)
+            ssd = find_normalized_ssd(sample, window_slice, mask_slice, window_index)
             # print('ssd', ssd.shape)
             indices = get_candidate_indices(ssd)
             # print('incides', indices)
             selected_index = select_pixel_index(ssd, indices)
-            # print('selected_index', selected_index)
+            # print('selected_index2', selected_index)
 
             # Translate index to accommodate padding.
-            selected_index = (selected_index[0], selected_index[1], selected_index[2] + kernel_size // 2, selected_index[3] + kernel_size // 2)
+            # selected_index = (selected_index[0], selected_index[1], selected_index[2] + kernel_size // 2, selected_index[3] + kernel_size // 2)
+            # print('selected_index3',selected_index)
+
             # print('selected_index', selected_index)
             # Set windows and mask.
             # This will update padded_window and padded_mask as well
