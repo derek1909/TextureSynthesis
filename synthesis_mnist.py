@@ -65,7 +65,7 @@ def find_normalized_ssd(sample, window, mask, window_index):
     normalized_ssd = torch.maximum(torch.tensor(0.0), ssd / normalize_factor)
 
     # Add position penalty
-    h_indices, w_indices = torch.meshgrid(torch.arange(sh, device=device), torch.arange(sw, device=device), indexing='ij')
+    # h_indices, w_indices = torch.meshgrid(torch.arange(sh, device=device), torch.arange(sw, device=device), indexing='ij')
     # plt.figure()
     # plt.imshow(w_indices)
     # plt.title('w')
@@ -74,7 +74,19 @@ def find_normalized_ssd(sample, window, mask, window_index):
     # plt.title('h')
     # window_index = (20, 1)
 
-    position_penalty = 1 + ((h_indices - window_index[0])**2 + (w_indices - window_index[1])**2) # A magic number - to be change to a constant
+    # position_penalty = 1 + ((h_indices - window_index[0])**2 + (w_indices - window_index[1])**2) # A magic number - to be change to a constant
+
+    position_penalty = torch.full((sh, sw), float('inf'), device=device, dtype=torch.float64)
+
+    # window_index = (5, 5)
+
+    pad = 3
+    start_row = max(0, window_index[0] - pad)
+    end_row = min(sh, window_index[0] + pad + 1)
+    start_col = max(0, window_index[1] - pad)
+    end_col = min(sw, window_index[1] + pad + 1)
+
+    position_penalty[start_row:end_row, start_col:end_col] = 0
 
     # distance_square = (h_indices - window_index[0])**2 + (w_indices - window_index[1])**2
     # position_penalty = torch.exp(distance_square / (2 * sigma**2))
@@ -88,7 +100,7 @@ def find_normalized_ssd(sample, window, mask, window_index):
     # print('position_penalty', position_penalty.shape)
 
 
-    normalized_positional_ssd = normalized_ssd * position_penalty
+    normalized_positional_ssd = normalized_ssd + position_penalty
     # normalized_positional_ssd = normalized_ssd + position_penalty*1e-4
 
 
@@ -110,6 +122,7 @@ def get_candidate_indices(normalized_ssd, error_threshold=ERROR_THRESHOLD):
 
 def select_pixel_index(normalized_ssd, indices, method='uniform'):
     N = indices[0].shape[0]
+    # print('num of selection pool', N)
 
     if method == 'uniform':
         weights = torch.ones(N) / N
