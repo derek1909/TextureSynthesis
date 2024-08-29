@@ -74,7 +74,7 @@ def find_normalized_ssd(sample, window, mask, window_index):
     # plt.title('h')
     # window_index = (20, 1)
 
-    position_penalty = ((h_indices - window_index[0])**2 + (w_indices - window_index[1])**2)**2 # A magic number - to be change to a constant
+    position_penalty = 1 + ((h_indices - window_index[0])**2 + (w_indices - window_index[1])**2) # A magic number - to be change to a constant
 
     # distance_square = (h_indices - window_index[0])**2 + (w_indices - window_index[1])**2
     # position_penalty = torch.exp(distance_square / (2 * sigma**2))
@@ -110,12 +110,11 @@ def get_candidate_indices(normalized_ssd, error_threshold=ERROR_THRESHOLD):
 
 def select_pixel_index(normalized_ssd, indices, method='uniform'):
     N = indices[0].shape[0]
-    print('num of selection pool', N)
 
     if method == 'uniform':
         weights = torch.ones(N) / N
-        # selection = torch.randint(0, N, (1,)).item()
-        selection = torch.multinomial(weights, 1).item()
+        selection = torch.randint(0, N, (1,)).item()
+        # selection = torch.multinomial(weights, 1).item()
 
     else:
         # this option does work now - due to ssd might be zero (clipped to zero from negative value)
