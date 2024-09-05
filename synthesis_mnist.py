@@ -189,7 +189,7 @@ def texture_can_be_synthesized(mask):
     
     return num_incomplete > 0
 
-def initialize_texture_synthesis(test_sample, window_size, kernel_size, seed_size=3):
+def initialize_texture_synthesis(test_sample, test_label, window_size, kernel_size, seed_size=3):
 
     # Generate window and mask
     window = torch.zeros(window_size, dtype=torch.float64, device=device)
@@ -208,10 +208,11 @@ def initialize_texture_synthesis(test_sample, window_size, kernel_size, seed_siz
     # ih, iw = (window_size[0] // 2) - 1, (window_size[1] // 2) - 1
 
     seed = test_sample[ix, iy, ih:ih+seed_size, iw:iw+seed_size]
+    selected_label = test_label[ix].item()
     original_image = test_sample[ix, iy, :, :]
     plt.figure()
     plt.imshow(original_image.squeeze().cpu(), vmin=0, vmax=1, cmap='grey')
-    plt.title('original image')
+    plt.title(f'original image: {selected_label}')
 
     # Place seed in center of window
     ph, pw = (window_size[0] - seed_size + 1) // 2, (window_size[1] - seed_size + 1) // 2
@@ -225,16 +226,44 @@ def initialize_texture_synthesis(test_sample, window_size, kernel_size, seed_siz
     # Obtain views of the padded window and mask
     window = padded_window[pad:-pad, pad:-pad]
     mask = padded_mask[pad:-pad, pad:-pad]
-    return window, mask, padded_window, padded_mask
-    
-def synthesize_texture(sample, test_sample, window_size, kernel_size, seed_size):
+    return window, selected_label, mask, padded_window, padded_mask
+
+def filter_sample(label, selected_label, sample):
+    """
+    Filters the sample to keep only the images with the specified label.
+
+    Parameters:
+    - label: The label to filter by (e.g., 0, 1, ..., 9).
+    - sample: A tuple containing (images, labels).
+        - images: A tensor of shape (N, C, H, W) where N is the number of images.
+        - labels: A tensor of shape (N,) where N is the number of labels.
+
+    Returns:
+    - filtered_images: A tensor containing images with the specified label.
+    - filtered_labels: A tensor containing only the specified label.
+    """
+
+    # Create a boolean mask where True corresponds to the given label
+    mask = (label == selected_label)
+
+    # import ipdb; ipdb.set_trace()
+
+    # Filter the images and labels using the mask
+    filtered_sample = sample[mask]
+    filtered_labels = label[mask]
+
+    # print('filtered_sample: ', filtered_sample.shape)
+    return filtered_sample, filtered_labels
+
+def synthesize_texture(sample, label, test_sample, test_label, window_size, kernel_size, seed_size):
 
     start_time = time.time()
 
     sample = sample.to(dtype=torch.float64,device=device)
     
-    (window, mask, padded_window, padded_mask) = initialize_texture_synthesis(test_sample, window_size, kernel_size, seed_size)
+    (window, selected_label, mask, padded_window, padded_mask) = initialize_texture_synthesis(test_sample, test_label, window_size, kernel_size, seed_size)
 
+    filtered_sample, filtered_labels = filter_sample(label, selected_label, sample)
     # end_time = time.time()
     # execution_time = end_time - start_time
     # print(f'Initialization finished. Time used: {execution_time:.1f}s')
@@ -256,7 +285,7 @@ def synthesize_texture(sample, test_sample, window_size, kernel_size, seed_size)
             window_index = (ch + kernel_size // 2, cw + kernel_size // 2)
 
             # Compute SSD for the current pixel neighborhood and select an index with low error.
-            ssd = find_normalized_ssd(sample, window_slice, mask_slice, window_index)
+            ssd = find_normalized_ssd(filtered_sample, window_slice, mask_slice, window_index)
             # print('ssd', ssd.shape)
             indices = get_candidate_indices(ssd)
             # print('incides', indices)
@@ -270,7 +299,7 @@ def synthesize_texture(sample, test_sample, window_size, kernel_size, seed_size)
             # print('selected_index', selected_index)
             # Set windows and mask.
             # This will update padded_window and padded_mask as well
-            window[ch, cw] = sample[selected_index]
+            window[ch, cw] = filtered_sample[selected_index]
             mask[ch, cw] = 1
 
     #         if visualize:
