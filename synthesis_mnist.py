@@ -50,64 +50,55 @@ def find_normalized_ssd(sample, window, mask, window_index):
     kernel_1d = torch.exp(- (x-(kernel_size-1)/2)**2 / (2 * sigma**2))
     kernel_1d = kernel_1d / kernel_1d.sum()  # Normalize the kernel
     kernel_2d = kernel_1d[:, None] @ kernel_1d[None, :] * mask
+    kernel_2d = kernel_2d.unsqueeze(0).unsqueeze(0)  # add batch and channel dimension for conv2d
+    # plt.figure()
+    # plt.imshow(sample[2000,0].cpu())
 
-    # Apply convolution to compute SSD
-    # (a-b)^2 = a^2+b^2-2ab
-    window = window.unsqueeze(0).unsqueeze(0)
-    kernel_2d = kernel_2d.unsqueeze(0).unsqueeze(0)
+    # Define the padding area
+    pad = 2
+    context = kernel_size // 2  # Context based on kernel size
+    # print('pad=',pad, ', context=', context)
+    # Calculate indices with context for kernel
+    start_row_conv = max(0, window_index[0] - pad - context)
+    end_row_conv = min(sh, window_index[0] + pad + context + 1)
+    start_col_conv = max(0, window_index[1] - pad - context)
+    end_col_conv = min(sw, window_index[1] + pad + context + 1)
 
-    # ssd has same shape with sample
-    ssd = F.conv2d(sample**2, kernel_2d, padding='same') - 2 * F.conv2d(sample, kernel_2d * window, padding='same') + (window**2 * kernel_2d).sum()
-    # print('ssd', ssd.shape)
+    # print('window index: ', window_index[0],window_index[1] )
+    # print('conv index: ', start_row_conv,end_row_conv,start_col_conv,end_col_conv)
 
+    # Extract the subsample area
+    subsample = sample[..., start_row_conv:end_row_conv, start_col_conv:end_col_conv]
+
+    # Apply convolution on the subsample
+    local_ssd = F.conv2d(subsample**2, kernel_2d, padding='same') - 2 * F.conv2d(subsample, kernel_2d * window, padding='same') + (window**2 * kernel_2d).sum()
+
+    # Initialize a full size SSD tensor
+    ssd_full = torch.full(sample.shape, float('inf'), device=device, dtype=torch.float64)
+    ssd_full[..., start_row_conv:end_row_conv, start_col_conv:end_col_conv] = local_ssd  # squeeze if necessary depending on your channel dimension setup
+
+    # Trim local_ssd
+    start_row = max(0, window_index[0] - context)
+    end_row = min(sh, window_index[0] + context + 1)
+    start_col = max(0, window_index[1] - context)
+    end_col = min(sw, window_index[1] + context + 1)
+    # plt.figure()
+    # plt.imshow(ssd_full[2000,0].cpu())
+
+    # Trim ssd_full (within convolution range but above the target window)
+    ssd_full[..., start_row_conv:start_row, start_col_conv:end_col_conv] = float('inf') # Top rows 
+    ssd_full[..., end_row:end_row_conv, start_col_conv:end_col_conv] = float('inf') # Bottom rows
+    ssd_full[..., start_row_conv:end_row_conv, start_col_conv:start_col] = float('inf') # Left columns
+    ssd_full[..., start_row_conv:end_row_conv, end_col:end_col_conv] = float('inf') # Right columns
+    
+    # print('ssd_full',ssd_full.shape)
     # Normalize the SSD
     normalize_factor = kernel_2d.sum().item()
-    normalized_ssd = torch.maximum(torch.tensor(0.0), ssd / normalize_factor)
-
-    # Add position penalty
-    # h_indices, w_indices = torch.meshgrid(torch.arange(sh, device=device), torch.arange(sw, device=device), indexing='ij')
+    normalized_ssd = torch.maximum(torch.tensor(0.0, device=device), ssd_full / normalize_factor)
     # plt.figure()
-    # plt.imshow(w_indices)
-    # plt.title('w')
-    # plt.figure()
-    # plt.imshow(h_indices)
-    # plt.title('h')
-    # window_index = (20, 1)
-
-    # position_penalty = 1 + ((h_indices - window_index[0])**2 + (w_indices - window_index[1])**2) # A magic number - to be change to a constant
-
-    position_penalty = torch.full((sh, sw), float('inf'), device=device, dtype=torch.float64)
-
-    # window_index = (5, 5)
-
-    pad = 3
-    start_row = max(0, window_index[0] - pad)
-    end_row = min(sh, window_index[0] + pad + 1)
-    start_col = max(0, window_index[1] - pad)
-    end_col = min(sw, window_index[1] + pad + 1)
-
-    position_penalty[start_row:end_row, start_col:end_col] = 0
-
-    # distance_square = (h_indices - window_index[0])**2 + (w_indices - window_index[1])**2
-    # position_penalty = torch.exp(distance_square / (2 * sigma**2))
-
-    # print('position_penalty', position_penalty.shape)
-
-    # plt.figure()
-    # plt.imshow(position_penalty.cpu())
-    # plt.title('position_penalty')
+    # plt.imshow(ssd_full[2000,0].cpu())
     # error
-    # print('position_penalty', position_penalty.shape)
-
-
-    normalized_positional_ssd = normalized_ssd + position_penalty
-    # normalized_positional_ssd = normalized_ssd + position_penalty*1e-4
-
-
-    # print('normalized_positional_ssd', normalized_positional_ssd.shape)
-    # plt.imshow(normalized_ssd.squeeze().squeeze().cpu().numpy())
-    # error
-    return normalized_positional_ssd
+    return normalized_ssd
 
 def get_candidate_indices(normalized_ssd, error_threshold=ERROR_THRESHOLD):
     min_non_zero_ssd = normalized_ssd[normalized_ssd > 0].min() # Get the minimum non-zero SSD value
