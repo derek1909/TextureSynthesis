@@ -35,7 +35,7 @@ device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 EIGHT_CONNECTED_NEIGHBOR_KERNEL = torch.tensor([[1., 1., 1.],
                                                [1., 0., 1.],
-                                               [1., 1., 1.]], dtype=torch.float64, device=device)
+                                               [1., 1., 1.]], dtype=torch.float32, device=device)
 SIGMA_COEFF = 6.4      # The denominator for a 2D Gaussian sigma used in the reference implementation.
 ERROR_THRESHOLD = 0.1  # The default error threshold for synthesis acceptance in the reference implementation.
 
@@ -47,7 +47,7 @@ def find_normalized_ssd(sample, window, mask, window_index):
 
     # Form a 2D Gaussian weight matrix from symmetric linearly separable Gaussian kernels
     sigma = kernel_size / SIGMA_COEFF
-    x = torch.arange(kernel_size, device=device, dtype=torch.float64)
+    x = torch.arange(kernel_size, device=device, dtype=torch.float32)
     kernel_1d = torch.exp(- (x-(kernel_size-1)/2)**2 / (2 * sigma**2))
     kernel_1d = kernel_1d / kernel_1d.sum()  # Normalize the kernel
     kernel_2d = kernel_1d[:, None] @ kernel_1d[None, :] * mask
@@ -75,7 +75,7 @@ def find_normalized_ssd(sample, window, mask, window_index):
     local_ssd = F.conv2d(subsample**2, kernel_2d, padding='same') - 2 * F.conv2d(subsample, kernel_2d * window, padding='same') + (window**2 * kernel_2d).sum()
 
     # Initialize a full size SSD tensor
-    ssd_full = torch.full(sample.shape, float('inf'), device=device, dtype=torch.float64)
+    ssd_full = torch.full(sample.shape, float('inf'), device=device, dtype=torch.float32)
     ssd_full[..., start_row_conv:end_row_conv, start_col_conv:end_col_conv] = local_ssd  # squeeze if necessary depending on your channel dimension setup
 
     # Trim local_ssd
@@ -143,7 +143,7 @@ def select_pixel_index(normalized_ssd, indices, method='uniform'):
 def get_neighboring_pixel_indices(pixel_mask):
     # Taking the difference between the dilated mask and the initial mask
     # gives only the 8-connected neighbors of the mask frontier.
-    kernel = torch.ones((3, 3), dtype=torch.float64, device=device)
+    kernel = torch.ones((3, 3), dtype=torch.float32, device=device)
     dilated_mask = F.conv2d(pixel_mask.unsqueeze(0).unsqueeze(0), 
                             kernel.unsqueeze(0).unsqueeze(0), padding='same') 
     dilated_mask = (dilated_mask > 0).float() # make it binary
@@ -198,19 +198,190 @@ def texture_can_be_synthesized(mask):
     
     return num_incomplete > 0
 
+
+from einops import rearrange
+
+def unfold_image(imgs,PATCH_SIZE=6,hop_length=2,color_num=3):
+    """
+    Unfold each image in imgs into a bag of patches.
+    Args:
+        imgs: Image with dimension [bsz, c, h, w].
+        PATCH_SIZE: patch size for each image patch after unfolding, p_h and p_w stands for the height and width of the patch.
+    Returns:
+        bag_of_patche: List of image patches with size [bsz, c, p_h, p_w, num_patches]. Each patch has the shape [c, p_h, p_w]
+    """
+    bag_of_patches = F.unfold(imgs, PATCH_SIZE, stride=hop_length)
+    bag_of_patches = rearrange(bag_of_patches,"bsz (c p_h p_w) b -> bsz c p_h p_w b",c=color_num,p_h=PATCH_SIZE)
+    return bag_of_patches
+
+
+# essential function to implement SMT
+def sparsify_general1(x, basis, t = 0.3):
+    """
+    This function gives the general sparse feature for image patch x. We calculte the cosine similarity between
+    each image patch x and each dictionary element in basis. If the similarity pass threshold t, then the activation
+    is 0, else, the actiavtion is 0.
+
+    Assume both x and basis is normalized.
+
+    Args:
+        x: Flattened image patches with dimension [bsz, p_w*p_h*c].
+        basis: dictionary/codebook with dimension [p_w*p_h*c,num_dict_element], each column of the basis is a dictionary element.
+        t: threshold
+    Returns:
+        bag_of_patche: List of image patches with size [bsz, c, ps, ps, num_patches]. Each patch has the shape [c, ps, ps]
+    """
+
+    a = (torch.mm(basis.t(), x) > t).float()
+    # plt.imshow(a.cpu())
+    # error
+    return a
+
+
+
+
+from tqdm import tqdm
+
+
+def crop_sample(sample,mask,window):
+
+    # cropped_sample = (N,1,w,h)
+    # cropped_window = (w,h)
+
+    # Get the coordinates of the non-zero values in the mask
+    non_zero_coords = torch.nonzero(mask, as_tuple=True)
+
+    # Find the bounding box (min and max coordinates)
+    min_y, min_x = torch.min(non_zero_coords[0]), torch.min(non_zero_coords[1])
+    max_y, max_x = torch.max(non_zero_coords[0]), torch.max(non_zero_coords[1])
+
+    # Slice the image to get the region corresponding to the bounding box
+    cropped_sample = sample[:,:,min_y:max_y+1, min_x:max_x+1]
+    cropped_window = window[min_y:max_y+1, min_x:max_x+1]
+
+    # print('cropped_sample',cropped_sample.shape)
+    # print('cropped_window',cropped_window.shape)
+
+
+    return cropped_sample,cropped_window
+
+def calculate_SMT_features(data,batch_size):
+        # data: (N,1,w,h)
+    saved_variables = torch.load('SMT_tensors.pt', map_location=torch.device('cuda:0'))
+    hop_length = saved_variables['hop_length']
+    COLOR_NUM = saved_variables['COLOR_NUM']
+    whiteMat = saved_variables['whiteMat']
+    basis1 = saved_variables['basis1']
+    P_star = saved_variables['P_star']
+    threshold = saved_variables['threshold']
+    PATCH_SIZE = saved_variables['PATCH_SIZE']
+
+    IMAGE_SIZE = data.shape[2]
+    RG = int((IMAGE_SIZE-PATCH_SIZE)/hop_length)+1 # number of unfolded patches = RG**2
+    # output_w = torch.min(RG,4) # to hendle the case where RG is very small
+    output_w = 4
+
+
+    patches = unfold_image(data.to(device),PATCH_SIZE=PATCH_SIZE,hop_length=hop_length,color_num=COLOR_NUM)
+    #     demean/center each image patch
+    patches = patches.sub(patches.mean((2,3),keepdim =True))
+    #     aggregate all patches into together (squeeze into one dimension).
+    x = rearrange(patches,"bsz c p_h p_w b  ->bsz (c p_h p_w) b ")
+    x_flat = rearrange(x,"bsz p_d hw -> p_d (bsz hw)")
+    #     apply whiten transform to each image patch
+    x_flat = torch.mm(whiteMat, x_flat)
+    #     normalize each image patch
+    x_flat = x_flat.div(x_flat.norm(dim = 0, keepdim=True)+1e-9)
+    #     extract sparse feature vector ahat from each image patch, sparsify_general1 is f_gq in the paper
+    ahat = sparsify_general1(x_flat, basis1, t=threshold)
+    # ahat = one_sparse(x_flat, basis1)
+    #     project the sparse code into the spectral embeddings
+    temp = torch.mm(P_star, ahat)
+    temp = temp.div(temp.norm(dim=0, keepdim=True)+ 1e-9)
+
+    # print('temp',temp.shape)
+    temp = rearrange(temp,"c (b2 h w) -> b2 c h w",b2=batch_size,h=RG)
+    # print('temp',temp.shape)
+
+    #     apply spatial pooling
+
+    # print('F.adaptive_avg_pool2d(temp, output_w)',F.adaptive_avg_pool2d(temp, output_w).shape)
+
+    # if RG <= output_w:
+    #     return temp
+    # else:
+    return F.adaptive_avg_pool2d(temp, output_w)
+
+
 def SMT_filter(sample,mask,window):
 
-    SMT_sample = sample
+
+    cropped_sample, cropped_window = crop_sample(sample,mask,window)
+
+    print('current window size:',cropped_window.shape)
+
+    output_w = 4
+    num_dim = 350
+    batch_size = 10
+
+    cropped_window_features = calculate_SMT_features(cropped_window.unsqueeze(0).unsqueeze(0),batch_size=1)
+
+    cropped_sample_features = torch.zeros([cropped_sample.size(0),num_dim,output_w,output_w],device=device)
+    for idx in range(0, sample.size(0), batch_size):    
+        cropped_sample_features[idx:idx+batch_size,...] = calculate_SMT_features(cropped_sample[idx:idx+batch_size],batch_size=batch_size)
+    # ipdb.set_trace()
+
+
+    indices = softknn(test_features=cropped_window_features.flatten(1),
+                      train_features=cropped_sample_features.flatten(1),
+                      k=1000,
+                      ).squeeze()
+    # print(indices.shape)
+
+
+    SMT_sample = sample[indices]
+    # print(SMT_sample.shape)
+    # ipdb.set_trace()
 
 
     return SMT_sample
 
 
+def softknn(test_features,train_features,k=30,T=0.03,max_distance_matrix_size=int(5e6),distance_fx: str = "cosine",epsilon: float = 0.00001):
+
+    if distance_fx == "cosine":
+        train_features = F.normalize(train_features)
+        test_features = F.normalize(test_features)
+
+    num_train_images = train_features.shape[0]
+    num_test_images = test_features.shape[0]
+    # print('num_test_images',num_test_images)
+    # print('num_train_images',num_train_images)
+
+    k = min(k, num_train_images)
+
+    # calculate the dot product and compute top-k neighbors
+    if distance_fx == "cosine":
+        similarities = torch.mm(test_features, train_features.t())
+    elif distance_fx == "euclidean":
+        similarities = 1 / (torch.cdist(test_features, train_features) + epsilon)
+    else:
+        raise NotImplementedError
+
+    similarities, train_indices = similarities.topk(k, largest=True, sorted=True)
+    # print(train_features.shape)
+    # print(similarities.shape)
+    # print(train_indices.shape)
+
+    return train_indices
+
+
+
 def initialize_texture_synthesis(test_sample, window_size, kernel_size, seed_size=3):
 
     # Generate window and mask
-    window = torch.zeros(window_size, dtype=torch.float64, device=device)
-    mask = torch.zeros(window_size, dtype=torch.float64, device=device)
+    window = torch.zeros(window_size, dtype=torch.float32, device=device)
+    mask = torch.zeros(window_size, dtype=torch.float32, device=device)
 
     # Initialize window with random seed from sample
     # seed = a random 3x3 patch
@@ -248,7 +419,7 @@ def synthesize_texture(sample, test_sample, window_size, kernel_size, seed_size)
 
     start_time = time.time()
 
-    sample = sample.to(dtype=torch.float64,device=device)
+    sample = sample.to(dtype=torch.float32,device=device)
     
     (window, mask, padded_window, padded_mask) = initialize_texture_synthesis(test_sample, window_size, kernel_size, seed_size)
 
@@ -261,10 +432,13 @@ def synthesize_texture(sample, test_sample, window_size, kernel_size, seed_size)
         # Get neighboring indices that are neighbors of the already synthesized pixels
         neighboring_indices = get_neighboring_pixel_indices(mask)
 
+        SMT_sample = SMT_filter(sample,mask,window)
+        # print('SMT_sample',SMT_sample.shape)
+
         while neighboring_indices.size(0) > 0:
             # Permute and sort neighboring indices by number of sythesised pixels in 8-connected neighbors.
             neighboring_indices = permute_neighbors(mask, neighboring_indices)
-            
+
             ch, cw = neighboring_indices[0]
             window_slice = padded_window[ch:ch+kernel_size, cw:cw+kernel_size]
             mask_slice = padded_mask[ch:ch+kernel_size, cw:cw+kernel_size]
@@ -273,7 +447,7 @@ def synthesize_texture(sample, test_sample, window_size, kernel_size, seed_size)
             window_index = (ch + kernel_size // 2, cw + kernel_size // 2)
 
             # Compute SSD for the current pixel neighborhood and select an index with low error.
-            ssd = find_normalized_ssd(sample, window_slice, mask_slice, window_index)
+            ssd = find_normalized_ssd(SMT_sample, window_slice, mask_slice, window_index)
             # print('ssd', ssd.shape)
             indices = get_candidate_indices(ssd)
             # print('incides', indices)
@@ -287,7 +461,7 @@ def synthesize_texture(sample, test_sample, window_size, kernel_size, seed_size)
             # print('selected_index', selected_index)
             # Set windows and mask.
             # This will update padded_window and padded_mask as well
-            window[ch, cw] = sample[selected_index]
+            window[ch, cw] = SMT_sample[selected_index]
             mask[ch, cw] = 1
 
             # Remove the first indices
