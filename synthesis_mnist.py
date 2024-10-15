@@ -28,6 +28,7 @@ import time
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import ipdb
 
 # Check if CUDA is available
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -83,7 +84,7 @@ def find_normalized_ssd(sample, window, mask, window_index):
     start_col = max(0, window_index[1] - context)
     end_col = min(sw, window_index[1] + context + 1)
     # plt.figure()
-    # plt.imshow(ssd_full[2000,0].cpu())
+    # plt.imshow(ssd_full[200,0].cpu(),vmin=0,vmax=1)
 
     # Trim ssd_full (within convolution range but above the target window)
     ssd_full[..., start_row_conv:start_row, start_col_conv:end_col_conv] = float('inf') # Top rows 
@@ -96,7 +97,7 @@ def find_normalized_ssd(sample, window, mask, window_index):
     normalize_factor = kernel_2d.sum().item()
     normalized_ssd = torch.maximum(torch.tensor(0.0, device=device), ssd_full / normalize_factor)
     # plt.figure()
-    # plt.imshow(ssd_full[2000,0].cpu())
+    # plt.imshow(ssd_full[200,0].cpu(),vmin=0,vmax=1)
     # error
     return normalized_ssd
 
@@ -149,10 +150,18 @@ def get_neighboring_pixel_indices(pixel_mask):
     dilated_mask = dilated_mask.squeeze(0).squeeze(0)
 
     neighbors = dilated_mask - pixel_mask
+    
+    # fig, axes = plt.subplots(nrows=1, ncols=3, figsize=(10, 4))
+    # axes[0].imshow(pixel_mask.cpu(),vmin=0,vmax=1,cmap='grey')
+    # axes[1].imshow(dilated_mask.cpu(),vmin=0,vmax=1,cmap='grey')
+    # axes[2].imshow(neighbors.cpu(),vmin=0,vmax=1,cmap='grey')
+    # axes[0].set_title('pixel_mask Plot')
+    # axes[1].set_title('dilated_mask Plot')
+    # axes[2].set_title('neighbors Plot')
+    # ipdb.set_trace()
 
     # Recover the indices of the mask frontier.
     neighbor_indices = torch.nonzero(neighbors)
-
     return neighbor_indices
 
 def permute_neighbors(pixel_mask, neighbors):
@@ -188,6 +197,14 @@ def texture_can_be_synthesized(mask):
     num_incomplete = (mh * mw) - num_completed
     
     return num_incomplete > 0
+
+def SMT_filter(sample,mask,window):
+
+    SMT_sample = sample
+
+
+    return SMT_sample
+
 
 def initialize_texture_synthesis(test_sample, window_size, kernel_size, seed_size=3):
 
@@ -244,11 +261,11 @@ def synthesize_texture(sample, test_sample, window_size, kernel_size, seed_size)
         # Get neighboring indices that are neighbors of the already synthesized pixels
         neighboring_indices = get_neighboring_pixel_indices(mask)
 
-        # Permute and sort neighboring indices by number of sythesised pixels in 8-connected neighbors.
-        neighboring_indices = permute_neighbors(mask, neighboring_indices)
-        
-        for i in range(neighboring_indices.shape[0]):
-            ch, cw = neighboring_indices[i]
+        while neighboring_indices.size(0) > 0:
+            # Permute and sort neighboring indices by number of sythesised pixels in 8-connected neighbors.
+            neighboring_indices = permute_neighbors(mask, neighboring_indices)
+            
+            ch, cw = neighboring_indices[0]
             window_slice = padded_window[ch:ch+kernel_size, cw:cw+kernel_size]
             mask_slice = padded_mask[ch:ch+kernel_size, cw:cw+kernel_size]
             
@@ -273,17 +290,8 @@ def synthesize_texture(sample, test_sample, window_size, kernel_size, seed_size)
             window[ch, cw] = sample[selected_index]
             mask[ch, cw] = 1
 
-    #         if visualize:
-    #             cv2.imshow('synthesis window', result_window)
-    #             key = cv2.waitKey(1) 
-    #             if key == 27:
-    #                 cv2.destroyAllWindows()
-    #                 return result_window
-
-    # if visualize:
-    #     cv2.imshow('synthesis window', result_window)
-    #     cv2.waitKey(0)
-    #     cv2.destroyAllWindows()
+            # Remove the first indices
+            neighboring_indices = neighboring_indices[1:]
 
     end_time = time.time()
     execution_time = end_time - start_time
