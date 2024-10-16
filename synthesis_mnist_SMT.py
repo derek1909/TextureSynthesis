@@ -57,7 +57,7 @@ def find_normalized_ssd(sample, window, mask, window_index):
     # plt.imshow(sample[2000,0].cpu())
 
     # Define the padding area
-    pad = 2
+    pad = 0
     context = kernel_size // 2  # Context based on kernel size
     # print('pad=',pad, ', context=', context)
     # Calculate indices with context for kernel
@@ -440,7 +440,7 @@ def initialize_texture_synthesis(test_sample, window_size, kernel_size, seed_siz
     mask = padded_mask[pad:-pad, pad:-pad]
     return window, mask, padded_window, padded_mask
     
-def synthesize_texture(sample, test_sample, window_size, kernel_size, seed_size):
+def synthesize_texture_SMT(sample, test_sample, window_size, kernel_size, seed_size,out_dir=None):
 
     start_time = time.time()
 
@@ -457,6 +457,9 @@ def synthesize_texture(sample, test_sample, window_size, kernel_size, seed_size)
         # Get neighboring indices that are neighbors of the already synthesized pixels
         neighboring_indices = get_neighboring_pixel_indices(mask)
 
+        SMT_sample = SMT_filter(sample,mask,window,out_dir)
+
+
         while neighboring_indices.size(0) > 0:
             # Permute and sort neighboring indices by number of sythesised pixels in 8-connected neighbors.
             neighboring_indices = permute_neighbors(mask, neighboring_indices)
@@ -469,7 +472,7 @@ def synthesize_texture(sample, test_sample, window_size, kernel_size, seed_size)
             window_index = (ch + kernel_size // 2, cw + kernel_size // 2)
 
             # Compute SSD for the current pixel neighborhood and select an index with low error.
-            ssd = find_normalized_ssd(sample, window_slice, mask_slice, window_index)
+            ssd = find_normalized_ssd(SMT_sample, window_slice, mask_slice, window_index)
             # print('ssd', ssd.shape)
             indices = get_candidate_indices(ssd)
             # print('incides', indices)
@@ -478,7 +481,7 @@ def synthesize_texture(sample, test_sample, window_size, kernel_size, seed_size)
 
             # Set windows and mask.
             # This will update padded_window and padded_mask as well
-            window[ch, cw] = sample[selected_index]
+            window[ch, cw] = SMT_sample[selected_index]
             mask[ch, cw] = 1
 
             # Remove the first indices
