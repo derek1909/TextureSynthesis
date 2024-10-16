@@ -29,6 +29,7 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import ipdb
+import os
 
 # Check if CUDA is available
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -56,7 +57,7 @@ def find_normalized_ssd(sample, window, mask, window_index):
     # plt.imshow(sample[2000,0].cpu())
 
     # Define the padding area
-    pad = 2
+    pad = 0
     context = kernel_size // 2  # Context based on kernel size
     # print('pad=',pad, ', context=', context)
     # Calculate indices with context for kernel
@@ -313,12 +314,10 @@ def calculate_SMT_features(data,batch_size):
     return F.adaptive_avg_pool2d(temp, output_w)
 
 
-def SMT_filter(sample,mask,window):
-
+def SMT_filter(sample,mask,window,out_dir):
+    
 
     cropped_sample, cropped_window = crop_sample(sample,mask,window)
-
-    print('current window size:',cropped_window.shape)
 
     output_w = 4
     num_dim = 350
@@ -334,7 +333,7 @@ def SMT_filter(sample,mask,window):
 
     indices = softknn(test_features=cropped_window_features.flatten(1),
                       train_features=cropped_sample_features.flatten(1),
-                      k=1000,
+                      k=500,
                       ).squeeze()
     # print(indices.shape)
 
@@ -343,6 +342,32 @@ def SMT_filter(sample,mask,window):
     # print(SMT_sample.shape)
     # ipdb.set_trace()
 
+    print('printing SMT nearest neighbours... current window size:',cropped_window.shape[0])
+
+
+
+    fig, axes = plt.subplots(5, 5, figsize=(5, 5))
+
+    # Flatten the axes array for easy iteration
+    axes = axes.ravel()
+
+    # Plot each 2D tensor in its corresponding subplot
+    axes[0].imshow(cropped_window.cpu(), cmap='gray',vmin=0,vmax=1) # the generated
+    axes[0].axis('off')  # Hide axis labels and ticks
+    axes[0].set_title('reference')
+
+    for i in range(1,25):
+        axes[i].imshow(SMT_sample[i,0].cpu(), cmap='gray',vmin=0,vmax=1)
+        axes[i].axis('off')  # Hide axis labels and ticks
+
+    # Adjust layout so the plots are not overlapping
+    plt.tight_layout()
+    if (out_dir == None):
+        plt.show()
+    else:
+        out_name = f'{out_dir}/SMT_filter_{cropped_window.shape[0]}.png'
+        # print(out_name)
+        fig.savefig(out_name)
 
     return SMT_sample
 
@@ -396,10 +421,10 @@ def initialize_texture_synthesis(test_sample, window_size, kernel_size, seed_siz
     # ih, iw = (window_size[0] // 2) - 1, (window_size[1] // 2) - 1
 
     seed = test_sample[ix, iy, ih:ih+seed_size, iw:iw+seed_size]
-    original_image = test_sample[ix, iy, :, :]
-    plt.figure()
-    plt.imshow(original_image.squeeze().cpu(), vmin=0, vmax=1, cmap='grey')
-    plt.title('original image')
+    # original_image = test_sample[ix, iy, :, :]
+    # plt.figure()
+    # plt.imshow(original_image.squeeze().cpu(), vmin=0, vmax=1, cmap='grey')
+    # plt.title('original image')
 
     # Place seed in center of window
     ph, pw = (window_size[0] - seed_size + 1) // 2, (window_size[1] - seed_size + 1) // 2
@@ -415,7 +440,7 @@ def initialize_texture_synthesis(test_sample, window_size, kernel_size, seed_siz
     mask = padded_mask[pad:-pad, pad:-pad]
     return window, mask, padded_window, padded_mask
     
-def synthesize_texture(sample, test_sample, window_size, kernel_size, seed_size):
+def synthesize_texture(sample, test_sample, window_size, kernel_size, seed_size, use_SMT_filter=False,out_dir=None):
 
     start_time = time.time()
 
@@ -432,8 +457,12 @@ def synthesize_texture(sample, test_sample, window_size, kernel_size, seed_size)
         # Get neighboring indices that are neighbors of the already synthesized pixels
         neighboring_indices = get_neighboring_pixel_indices(mask)
 
-        SMT_sample = SMT_filter(sample,mask,window)
-        # print('SMT_sample',SMT_sample.shape)
+        # SMT_sample = SMT_filter(sample,mask,window)
+        if use_SMT_filter:
+            SMT_sample = SMT_filter(sample,mask,window,out_dir)
+
+        else:
+            SMT_sample = sample
 
         while neighboring_indices.size(0) > 0:
             # Permute and sort neighboring indices by number of sythesised pixels in 8-connected neighbors.
@@ -454,11 +483,6 @@ def synthesize_texture(sample, test_sample, window_size, kernel_size, seed_size)
             selected_index = select_pixel_index(ssd, indices)
             # print('selected_index2', selected_index)
 
-            # Translate index to accommodate padding.
-            # selected_index = (selected_index[0], selected_index[1], selected_index[2] + kernel_size // 2, selected_index[3] + kernel_size // 2)
-            # print('selected_index3',selected_index)
-
-            # print('selected_index', selected_index)
             # Set windows and mask.
             # This will update padded_window and padded_mask as well
             window[ch, cw] = SMT_sample[selected_index]
